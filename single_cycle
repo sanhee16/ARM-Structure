@@ -1,0 +1,631 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include "inst.h"
+
+void openfile();
+void decode();
+void fetch();
+void execute();
+void memory();
+void writeback();
+void control(int diff);
+void settingMux();
+int set_operand2(int operand2);
+int arith(int num,int ari);
+int rotate(int num, int rot);
+void get_rlist(int Rlist);
+int put_data(int addr);
+void checkcond(int cond);
+void set_CPSR(int result);
+
+
+int pp, cycle;
+int reg_BDT[16];
+//control and mux
+int br_taken,regWrite, set_p, set_W, set_s, set_Link, set_u,set_w, set_l;
+
+
+int ignore;
+
+int mem[0x100000];
+int reg[16];
+int inst;
+int cpsr;
+unsigned int N_bit, Z_bit, C_bit, V_bit;
+
+int diff, cond;
+int alu_result,alu1,alu2,alu2_op,wdata,wreg,wreg_Rn;
+int opcode,I,S,Rn,Rd,operand2,P,U,B,W,L,Link,offset,S_user,RList,imm4,imm12;
+int get_bx, get_mov;
+
+void main(){
+
+        cycle=0;
+        reg[15]=0;
+        reg[14]=0xffffffff;
+        reg[13]=0x400000;
+        openfile();
+
+        while(1){
+                        cycle++;
+                        if(pp)printf("\n--------------cycle %d-------------------\n",cycle);
+                        fetch();
+                        decode();
+                        execute();
+                        memory();
+                        writeback();
+                        if(reg[15]==0xffffffff) break;
+                        if(!br_taken){
+                                reg[15]=reg[15]+4;
+                        }
+                        if(pp)printf("\n");
+        }
+        printf("\n\n----------------------result-------------------------\n\n");
+        printf("reg[3] %d\ncycle %d\n\n",reg[3],cycle);
+        return;
+}
+
+void fetch(){
+        inst = mem[reg[15]/4];
+        return;
+}
+
+void decode(){
+        ignore=0; br_taken=0; diff=0; cond=0;
+        diff = (inst&0x0E000000)>>25;
+        cond = (inst&0xF0000000)>>28;
+        checkcond(cond);
+
+        if(pp)printf("pc 0x%08x\t\tinst : 0x%08x \n",reg[15],inst);
+        get_bx=0; get_mov=0;
+        get_bx = inst&0x0FFFFFF0;
+        if((diff==0b000)&&(get_bx==0x012FFF10)){
+                if(pp)printf("bx\n");
+                Rn=inst&0x0000000F;
+                reg[15]=reg[Rn];
+        }
+        else if((diff==0b001)||(diff==0b000)){ //data processing
+                        get_mov=(inst&0x0FF00000)>>20;
+                        if((get_mov==0b00110000)||(get_mov==0b00110100)){       //movw
+                                imm4=(inst&0x000F0000)>>16;
+                                Rd=(inst&0x0000F000)>>12;
+                                imm12=(inst&0x00000FFF);
+                                wreg=Rd;
+                                alu1=imm4<<12;
+                                alu2=imm12;
+                        }
+                        else{
+                                I=diff&0x1;
+                                opcode = (inst&0x01E00000)>>21;
+                                S=(inst&0x00100000)>>20;
+                                Rn=(inst&0x000F0000)>>16;
+                                Rd=(inst&0x0000F000)>>12;
+                                operand2=(inst&0x00000FFF);
+                                alu2=set_operand2(operand2);
+                                alu1=reg[Rn];
+                                wreg=Rd;
+                        }
+        }
+        else if((diff==0b010)||(diff==0b011)){ //single data transfer <L/S>
+                P=(inst&0x01000000)>>24;
+                U=(inst&0x00800000)>>23;
+                B=(inst&0x00400000)>>22;
+                W=(inst&0x00200000)>>21;
+                L=(inst&0x00100000)>>20;
+                Rn=(inst&0x000F0000)>>16;
+                Rd=(inst&0x0000F000)>>12;
+                offset=(inst&0x00000FFF);
+
+                if(diff==0b011){ // shift+Rm
+                        offset=set_operand2(offset);
+                }
+                else if(diff==0b010){ // imm
+                        offset=offset;
+                }
+                alu1=reg[Rn];
+                if(U==1){
+                        alu2=offset;
+                }
+                else if(U==0){
+                        alu2=-offset;
+                }
+                wreg=Rd;
+                wreg_Rn=Rn;
+        }
+        else if(diff==0b101){//branch and branch link
+                Link = (inst&0x01000000)>>24;
+                offset = (inst&0x00FFFFFF);
+                offset=offset<<2;
+                if(((offset>>25)&0x00000001)==1){
+                        offset=offset|0xFC000000;
+                }
+                alu2=offset;
+                alu1=reg[15];
+        }
+        else if(diff==0b100){//block data transfer
+                P=(inst&0x01000000)>>24;
+                U=(inst&0x00800000)>>23;
+                S_user=(inst&0x00400000)>>22;
+                W=(inst&0x00200000)>>21;
+                L=(inst&0x00100000)>>20;
+                Rn=(inst&0x000F0000)>>16;
+                RList=(inst&0x0000FFFF);
+                alu1=reg[Rn];
+                if(U==1){
+                        alu2=4;
+                }
+                else if(U==0){
+                        alu2=-4;
+                }
+                wreg=RList;
+                wreg_Rn=Rn;
+        }
+        control(diff);
+        return ;
+}
+
+
+void control(int diff){
+        if((diff==0b001)||(diff==0b000)||(diff==0b101)){
+                regWrite=1; set_p=1; set_w=0; set_s=S; set_Link=0; set_u=2; set_l=2;
+                if(diff==0b101){
+                        set_Link=Link; set_s=0; regWrite=0;
+                }
+                else if((get_bx==0x012FFF10)||(opcode==CMP)){
+                        regWrite=0;
+                }
+        }
+        else if((diff==SDT)||(diff==SDTI)){
+                regWrite=0; set_p=P; set_w=W; set_s=0; set_Link=0; set_u=U; set_l=L;
+        }
+        else if((diff==BDT)){
+                regWrite=0; set_p=P; set_w=W; set_s=0; set_Link=0; set_u=U; set_l=L;
+        }
+        if((get_mov==0b00110000)||(get_mov==0b00110100)){
+                regWrite=1; set_p=1; set_w=0; set_s=0; set_Link=0; set_u=2; set_l=2;
+        }
+
+        settingMux();
+        return ;
+}
+
+
+int mux_prepost,up,down,mux_setcond,wb_Rn,memread,memwrite,mux_link;
+
+void settingMux(){
+        if(set_p){mux_prepost = 1;}
+        else{mux_prepost = 0;}
+
+        if(set_u==1){up = 1; down=0;}
+        else if(set_u==0){down = 1; up=0;}
+        else if(set_u==2){up=2; down=2;}
+
+        if(set_s){mux_setcond=1;}
+        else{mux_setcond=0;}
+
+        if(set_w){wb_Rn=1;}
+        else{wb_Rn=0;}
+
+        if(set_l==1){memread=1; memwrite=0;}
+        else if(set_l==0){memwrite=1; memread=0;}
+        else if(set_l==2){memwrite=0; memread=0;}
+
+        if(set_Link){mux_link=1;}
+        else{mux_link=0;}
+
+        return ;
+}
+
+void execute(){
+        if(ignore){     return; }
+        int result;
+        switch(diff){
+                        case SDT:
+                        case SDTI:
+                        case BDT:
+                                        result=alu1+alu2;
+                                        break;
+
+                        case branch:
+                                        if(Link){ reg[14]=reg[15]+4; }
+                                        reg[15]=alu1+alu2+0x8;
+                                        if(pp)printf("pc : %d\n",reg[15]);
+                                        br_taken=1;
+                                        break;
+
+                        case DP:
+                        case DPI:
+                                        if(get_mov==0b00110100){
+                                                result=((alu1|alu2)<<16)&0xffff0000;
+                                        }
+                                        else if(get_mov==0b00110000){
+                                                result=alu1|alu2;
+                                        }
+                                        else{
+                                                switch(opcode){
+                                                        case ADD:
+                                                                        result=alu1+alu2;
+                                                                        alu2_op=alu2;
+                                                                        break;
+                                                        case SUB:
+                                                                        result=alu1-alu2;
+                                                                        alu2_op=0xffffffff-alu2;
+                                                                        break;
+                                                        case RSB:
+                                                                        result=alu2-alu1;
+                                                                        alu2_op=0xffffffff-alu2;
+                                                                        break;
+                                                        case CMP:
+                                                                        result=alu1-alu2;
+                                                                        alu2_op=0xffffffff-alu2;
+                                                                        break;
+                                                        case MOV:
+                                                                        result=alu2;
+                                                                        break;
+                                                        case AND:
+                                                                        result=alu1&alu2;
+                                                                        alu2_op=alu2;
+                                                                        break;
+                                                        case ORR:
+                                                                        result=alu1|alu2;
+                                                                        alu2_op=alu2;
+                                                                        break;
+                                                        defalut :
+                                                                        printf("nope \n");
+                                                                        break;
+                                                }
+                                        }
+                                        if(mux_setcond){
+                                                set_CPSR(result);
+                                        }
+
+                                        break;
+                }
+        if(pp)printf("alu_result : %d (0x%x)\n",result,result);
+        alu_result=result;
+        return ;
+}
+
+
+void memory(){
+        if(ignore) return ;
+        if((diff==0b001)||(diff==0b000)||(diff==0b101)){
+                wdata=alu_result;
+                return ;
+        }
+
+        int addr = alu_result;
+        if(mux_prepost==0){
+                addr=alu_result-alu2;
+        }
+        if(memread){
+                if((diff==SDT)||(diff==SDTI)){
+                        reg[Rd]=mem[addr/4];
+                        if(Rd==15){br_taken=1;}
+                }
+                else if(diff==BDT){
+                        get_rlist(RList);
+                        addr=put_data(addr);
+                }
+        }
+
+
+        if(memwrite){
+                if((diff==SDT)||(diff==SDTI)){
+                        mem[addr/4]=reg[Rd];
+                        if(Rd==15){br_taken=1;}
+                }
+
+                else if(diff==BDT){
+                        get_rlist(RList);
+                        addr=put_data(addr);
+                }
+
+        }
+
+        if(mux_prepost==0){
+                addr=addr+alu2;
+        }
+
+        wdata=addr;
+        return ;
+}
+
+void checkcond(int cond){
+
+        N_bit=(cpsr&0x80000000)>>31;
+        Z_bit=(cpsr&0x40000000)>>30;
+        C_bit=(cpsr&0x20000000)>>29;
+        V_bit=(cpsr&0x10000000)>>28;
+
+        switch(cond){
+                case 0x0://EQ
+                        if(Z_bit==1){
+                                ignore=0;
+                        }
+                        else{
+                                ignore=1;
+                        }
+
+                break;
+
+                case 0x1: //NE
+                        if(Z_bit==0){
+                                ignore=0;
+                        }
+                        else{
+                                ignore=1;
+                        }
+                        break;
+
+                case 0xa: //GE
+                        if(N_bit==V_bit){
+                                ignore=0;
+                        }
+                        else{
+                                ignore=1;
+                        }
+                        break;
+
+                case 0xc: //GT
+                        if((Z_bit==0)&&(N_bit==V_bit)){
+                                ignore=0;
+                        }
+                        else{
+                                ignore=1;
+                        }
+                        break;
+
+
+                case 0xd: //LE
+                        if((Z_bit==1)||(N_bit!=V_bit)){
+                                ignore=0;
+                        }
+                        else{
+                                ignore=1;
+                        }
+                        break;
+
+                case 0xe: //AL
+                        ignore=0;
+                        break;
+        }
+        return ;
+}
+
+void set_CPSR(int result){
+        if(pp)printf("set cond\n");
+
+        if(result>=0){
+                N_bit=0;
+        }
+        else{
+                N_bit=1;
+        }
+        if(result==0){
+                Z_bit=1;
+        }
+        else{
+                Z_bit=0;
+        }
+
+        unsigned int result_MSB,alu1_MSB, alu2_MSB; // overflow
+        alu1_MSB=(alu1>>31)&0x00000001;
+        alu2_MSB=(alu2_op>>31)&0x00000001;
+        result_MSB=(result>>31)&0x00000001;
+        if(((alu1_MSB==0)&&(alu2_MSB==0)&&(result_MSB==1))||((alu1_MSB==1)&&(alu2_MSB==1)&&(result_MSB==0))){
+                V_bit=1;
+        }
+        else{
+                V_bit=0;
+        }
+
+        cpsr=(N_bit<<31)|(Z_bit<<30)|(C_bit<<29)|(V_bit<<28);
+
+        return ;
+}
+
+
+
+
+void writeback(){
+        if(ignore) return;
+        if(regWrite==1){
+                if(pp)printf("wb Rd \n");
+                if(get_mov==0b00110100){
+                        reg[wreg]=wdata|(reg[wreg]&0x0000FFFF);
+                }
+                else{
+                        reg[wreg]=wdata;
+                }
+                if(pp)printf("Reg[%d] = %d (0x%x) \n",wreg, reg[wreg], reg[wreg]);
+        }
+        if(wb_Rn){
+                reg[wreg_Rn]=wdata;
+                if(pp)printf("[wreg_WB]Reg[%d] = %d (0x%x) \n",wreg_Rn, reg[wreg_Rn], reg[wreg_Rn]);
+        }
+
+        return ;
+}
+
+
+int put_data(int addr){
+        if(up==1){
+                for(int a=0;a<16;a++){
+                        if(reg_BDT[a]==1){
+                                if(memread){
+                                        reg[a]=mem[addr/4];
+                                        if(a==15){br_taken=1;}
+                                }
+                                if(memwrite){
+                                        mem[addr/4]=reg[a];
+                                        if(a==15){mem[addr/4]=reg[15]+12; br_taken=1;}
+                                }
+                                addr=addr+4;
+                        }
+                }
+                addr=addr-4;
+        }
+
+        else if(down==1){
+                for(int a=15;a>(-1);a--){
+                        if(reg_BDT[a]==1){
+                                if(memread){
+                                        reg[a]=mem[addr/4];
+                                        if(a==15){br_taken=1;}
+                                }
+                                if(memwrite){
+                                        mem[addr/4]=reg[a];
+                                        if(a==15){mem[addr/4]=reg[15]+12; br_taken=1;}
+                                }
+                                if(a==15) break;
+                                addr=addr-4;
+                        }
+                }
+                addr=addr+4;
+        }
+
+        return addr;
+}
+
+
+
+
+
+void get_rlist(int wreg){
+        memset(reg_BDT,0,sizeof(int)*16);
+        for(int a=0;a<16;a++){
+                if((wreg&0x1)==1){
+                        reg_BDT[a]=1;
+                }
+                else{
+                        reg_BDT[a]=0;
+                }
+                wreg=wreg>>1;
+        }
+        return ;
+}
+
+
+
+
+
+int set_operand2(int operand2){
+        int oper2;
+        if((diff==0b001)||(diff==0b011)){
+                unsigned int imm, rot;
+                rot=(operand2&0xF00)>>8;
+                imm=operand2&0xFF;
+                oper2 = rotate(imm, rot);
+        }
+
+
+        else if((diff==0b000)||(diff==0b010)){
+                unsigned int shift=(operand2&0xFF0)>>4;
+                unsigned int Rm=operand2&0xF;
+                unsigned int rm_data=reg[Rm];
+
+                if((shift&0x1)==1){
+                        if(pp)printf("\n\n++++++++use RS+++++++\n\n");
+                        oper2=0;
+                }
+
+                else if((shift&0x1)==0){
+                        unsigned int shift_type=(shift&0x06)>>1;
+                        unsigned int shift_amount=(shift&0xF8)>>3;
+                        if(shift_type==0){ //LSL
+                                oper2=rm_data<<shift_amount;
+                        }
+                        else if(shift_type==1){
+                                oper2=rm_data>>shift_amount;
+                        }
+                        else if(shift_type==2){
+                                oper2 = arith(rm_data,shift_amount);
+                        }
+                        else if(shift_type==3){
+                                oper2=rotate(rm_data,shift_amount);
+                        }
+
+                }
+
+        }
+
+        return oper2;
+}
+
+int arith(int num,int ari){
+
+        unsigned int temp=num&0x80000000;
+        unsigned int add = temp;
+        for(int a=0; a<ari ; a++){
+                temp=add|((temp>>1)&0x7FFFFFFF);
+                num=(num>>1)&0x7FFFFFFF;
+        }
+        num=temp|num;
+
+        return num;
+}
+
+int rotate(int num, int rot){
+        int loop=rot*2;
+        for(int a=0; a<loop; a++){
+                unsigned int temp=0;
+                temp = ((num&0x1)<<31)&0x80000000;
+                num=num>>1;
+                num=temp|(num&0x7FFFFFFF);
+        }
+        return num;
+}
+
+
+
+
+void openfile(){
+        FILE* fp = NULL;
+        int val = 0;
+        int res;
+        int num = 0;
+        char* path;
+
+        path = (char*)malloc(sizeof(char)*10);
+
+        //if(argc == 2){path=argv[1];}
+
+        printf("enter the bin file : ");
+        scanf("%s",path);
+
+        printf("enter the option [printout = 1 | no print = 0] : ");
+        scanf("%d",&pp);
+
+        if((strcmp(path,"s1"))==0) path="simple.bin";
+        if((strcmp(path,"s2"))==0) path="simple2.bin";
+        if((strcmp(path,"s3"))==0) path="simple3.bin";
+        if((strcmp(path,"s4"))==0) path="sim4.bin";
+        if((strcmp(path,"fib"))==0) path="fib2.bin";
+        if((strcmp(path,"gcd"))==0) path="gcd2.bin";
+        if((strcmp(path,"in"))==0) path="input4.bin";
+
+        fp = fopen(path, "rb");
+
+        if(fp==NULL){
+                        if(pp)printf("invalid input file: %s\n",path);
+                        return ;
+        }
+
+        while(1){
+                        res = fread(&val, 4,  1, fp);
+                        if(res == 0)break;
+                        //              if(pp)printf("val : 0x%08x \n",val);
+                        //              inst = ((val&0x000000FF) << 24)|((val&0x0000FF00) << 8)|((val&0x00FF0000) >> 8)|((val&0xFF000000)>>24);
+                        mem[num] = val;
+                        num++;
+        }
+
+        if(pp)printf("-------------------instruction-----------------\n");
+
+        for(int x = 0; x < num ; x++)
+                        if(pp)printf("inst%d : 0x%08x\n", x , mem[x]);
+
+        return ;
+}
