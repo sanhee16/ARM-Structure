@@ -1,7 +1,7 @@
 # arm_structure
 
 ### skills   
-C, Linux   
+C, Linux, arm Assembly   
 
 ### sample input files  
 다음 7개의 코드(mips 코드를 cross compile해서 arm코드로 바꿈)를 읽어서 실행시키는 simulator
