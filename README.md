@@ -1,4 +1,4 @@
-# arm_structure
+# ARM Structure
 
 ### skills   
 C, Linux, arm Assembly   
